@@ -1,0 +1,290 @@
+cd /data_analysis/xinjunyi/MR_ACE2_smoke/analysis
+
+mkdir cig
+
+cd ./cig
+
+setwd("/data_analysis/xinjunyi/MR_ACE2_smoke/analysis/cig")
+library(data.table)
+library(stringr)
+
+ex<-read.csv("../exposure_cig.csv",header=T)
+
+bim<-fread("/data_analysis/dbGap/GTEx_V7/GenotypeFiles/phg000830.v1.GTEx_WGS.genotype-calls-vcf.c1/GTEx_WGS.bim",header=F)
+bim<-data.frame(bim)
+names(bim)[c(1,2,4)]<-c("Chr","SNP","Pos")
+
+ex_snp1<-merge(ex_snp,bim,by=c("Chr","Pos"),sort=F)
+
+ex_snp_mis<-ex_snp[!ex_snp$rsID%in%ex_snp1$rsID,]
+
+range(ex_snp1$Alternate.Allele.Frequency)
+
+write.csv(ex_snp1,"exposure_cig_SNP.csv",row.names=F)
+write.table(ex_snp1$SNP,"exposure_cig_SNP.id",row.names=F,quote=F,col.names=F)
+write.table(ex_snp1[c("SNP","rsID")],"exposure_cig_SNP_rs.id",row.names=F,quote=F,col.names=F)
+
+system("plink109 --bfile /data_analysis/dbGap/GTEx_V7/GenotypeFiles/phg000830.v1.GTEx_WGS.genotype-calls-vcf.c1/GTEx_WGS --extract exposure_cig_SNP.id --allow-no-sex --make-bed --out data_GTEx_cig")
+
+system("plink109 --bfile data_GTEx_cig --update-map exposure_cig_SNP_rs.id --update-name --allow-no-sex --make-bed --out data_GTEx_cig_update")
+
+
+#analysis-SNP and ACE2 expression
+setwd("/data_analysis/xinjunyi/MR_ACE2_smoke/analysis/cig")
+tissue<-read.table("../../name_all_tissues.txt",header=F)
+
+
+r<-NULL
+for (i in as.character(tissue[,1])){
+setwd("/data_analysis/xinjunyi/MR_ACE2_smoke/analysis/cig")
+system(paste0("mkdir ",i))
+setwd(paste0("./",i))
+system(paste0("plink109 --allow-no-sex --bfile ../data_GTEx_cig_update --keep /data_analysis/xinjunyi/MR_ACE2_smoke/keep_id/keep_",i,".id --make-bed --out data_",i,"_cig ","--pheno /data_analysis/xinjunyi/MR_ACE2_smoke/plink_phe_cov/phe_",i,".txt --pheno-name ACE2"))
+
+system(paste0("plink109 --bfile data_",i,"_cig --allow-no-sex --geno 0.05 --hwe 1e-6 --maf 0.01 --make-bed --out data_",i,"_cig_qc"))
+
+cov<-read.table(paste0("/data_analysis/xinjunyi/MR_ACE2_smoke/plink_phe_cov/phe_",i,".txt"),header=T)
+
+
+#system(paste0("plink109 --bfile data_",i,"_cig_qc --allow-no-sex --linear --ci 0.95 --covar /data_analysis/xinjunyi/MR_ACE2_smoke/plink_phe_cov/phe_",i,".txt --covar-name ",as.character(paste(names(cov)[-1:-4],collapse=","))," --hide-covar --out cig_",i))
+ 
+system(paste0("plink109 --bfile data_",i,"_cig_qc --allow-no-sex --recode A --out cig_",i))
+
+data<-read.table(paste0("cig_",i,".raw"),header=T)
+names(data)[-1:-6]<-str_replace_all(names(data)[-1:-6],"_.*","")
+data_all<-merge(data,cov,by=c("FID","IID"))
+system(paste0("echo '",i," ",dim(data_all)[1]==dim(cov)[1],"' >>../check_sample.txt"))
+
+result<-NULL
+for (j in 7:dim(data)[2]){
+rs<-names(data_all)[j]
+mo<-paste0("model<-glm(ACE2~",rs,"+",as.character(paste(names(cov)[-1:-4],collapse="+")),",data=data_all)")
+eval(parse(text=mo))
+
+p<-summary(model)$coefficients
+result1 <-cbind(SNP=rs,BETA=p[2,1],SE=p[2,2],L95=(p[2,1]-1.96*p[2,2]),U95=(p[2,1]+1.96*p[2,2]),P=p[2,4])
+result<-rbind(result,result1)
+}
+write.table(result, file = paste0("cig_",i,".assoc.linear"),row.names=F,quote=F,sep="\t")
+
+system(paste0("plink109 --bfile data_",i,"_cig_qc --allow-no-sex --freq --out cig_",i))
+
+out<-read.table(paste0("cig_",i,".assoc.linear"),header=T)
+freq<-read.table(paste0("cig_",i,".frq"),header=T)
+
+out1<-merge(freq[1:5],out,by=c("SNP"),sort=F)
+out1$exposure<-"cig"
+out1$tissue<-as.character(i)
+write.csv(out1,paste0("ACE2_cig_",i,".csv"),row.names=F,quote=F)
+
+system(paste0("plink109 --bfile data_",i,"_cig_qc --allow-no-sex --clump-p1 1 --clump-p2 1 --clump-r2 0.1 --clump-kb 500 --clump cig_",i,".assoc.linear --out cig_",i))
+clump<-read.table(paste0("cig_",i,".clumped"),header=T)
+out_clump<-out1[out1$SNP%in%clump$SNP,]
+write.csv(out_clump,paste0("ACE2_cig_clump_",i,".csv"),row.names=F,quote=F)
+r<-rbind(r,out_clump)
+print(paste0(which(i==c("Colon_Transverse","Esophagus_Mucosa","Liver","Lung","Small_Intestine_Terminal_Ileum","Prostate","Testis","Stomach")),"/8"))
+}
+
+setwd("..")
+write.csv(r,"ACE2_cig_all_clump.csv",row.names=F)
+
+
+#analysis-main MR
+setwd("D://ACE2_smoke_MR/analysis_reverse/analysis/cig")
+
+rm(list=ls())
+
+tissue<-read.table("../name_all_tissues.txt",header=F)
+
+r_summary<-NULL
+r_main<-NULL
+r_presso <-NULL
+r_second<-NULL
+r_sen1<-NULL
+r_sen2<-NULL
+
+for (i in as.character(tissue[,1])){
+setwd("D://ACE2_smoke_MR/analysis_reverse/analysis/cig")
+setwd(paste0("./",i))
+
+ex<-read.csv("../../exposure_cig.csv",header=T)
+ex1<-ex[c(2,3,4,5,6,7,10,11,9)]
+names(ex1)<-c("CHR","BP","SNP","Ref","ALT","EAF","BETA_ex","SE_ex","P_ex")
+ex1$BETA_ex_new<-abs(ex1$BETA_ex)
+ex1$Ref_new<-ex1$Ref
+ex1$Ref_new[ex1$BETA_ex<0]<-ex1$ALT[ex1$BETA_ex<0]
+ex1$ALT_new<-ex1$ALT
+ex1$ALT_new[ex1$BETA_ex<0]<-ex1$Ref[ex1$BETA_ex<0]
+ex1$EAF_new<-ex1$EAF
+ex1$EAF_new[ex1$BETA_ex<0]<-1-ex1$EAF[ex1$BETA_ex<0]
+
+ex2<-ex1[c(1,2,3,11,12,13,10,8,9)]
+names(ex2)<-c("CHR","BP","SNP","Ref","ALT","EAF","BETA_ex","SE_ex","P_ex")
+
+
+out<-read.csv(paste0("ACE2_cig_clump_",i,".csv"),header=T)
+out1<-out[c(1:7,10:12)]
+names(out1)[6:8]<-c("BETA_out","SE_out","P_out")
+
+m<-merge(ex2,out1,by=c("CHR","SNP"))
+print(paste0("sample check: ",dim(m)[1]==dim(out1)[1]))
+
+m$ALT<-as.character(m$ALT)
+m$Ref<-as.character(m$Ref)
+m$A1<-as.character(m$A1)
+m$A2<-as.character(m$A2)
+
+print(paste0("chain check: ",(sum(m$ALT==m$A1&m$Ref==m$A2)+sum(m$ALT==m$A2&m$Ref==m$A1))==dim(m)[1]))#check + - chain allele
+
+m$BETA_out_new[m$ALT==m$A1&m$Ref==m$A2]<-m$BETA_out[m$ALT==m$A1&m$Ref==m$A2]
+m$EAF_out[m$ALT==m$A1&m$Ref==m$A2]<-m$MAF[m$ALT==m$A1&m$Ref==m$A2]
+
+m$BETA_out_new[m$ALT==m$A2&m$Ref==m$A1]<--m$BETA_out[m$ALT==m$A2&m$Ref==m$A1]
+m$EAF_out[m$ALT==m$A2&m$Ref==m$A1]<-1-m$MAF[m$ALT==m$A2&m$Ref==m$A1]
+
+write.csv(m,paste0("Summary_ACE2_cig_",i,".csv"),row.names=F,quote=F)
+write.table(m,paste0("Summary_ACE2_cig_",i,".txt"),row.names=F,quote=F)
+
+######TwoSampleMR
+library(devtools)
+#install_github("MRCIEU/TwoSampleMR")
+
+library(TwoSampleMR)
+
+
+###main analysis ( all IVs)
+exposure_dat <- read_exposure_data(filename=paste0("Summary_ACE2_cig_",i,".txt"),clump = FALSE,sep = " ",phenotype_col = "exposure",snp_col = "SNP",beta_col = "BETA_ex",se_col = "SE_ex",eaf_col = "EAF",effect_allele_col = "ALT",other_allele_col = "Ref",pval_col = "P_ex",log_pval = FALSE)
+
+outcome_dat <- read_outcome_data(filename=paste0("Summary_ACE2_cig_",i,".txt"),snps = NULL,sep = " ",phenotype_col ="tissue",snp_col = "SNP",beta_col = "BETA_out_new",se_col = "SE_out",eaf_col = "EAF_out",effect_allele_col = "ALT",other_allele_col = "Ref",pval_col = "P_out",log_pval = FALSE)
+
+# Harmonise the exposure and outcome data
+dat <- harmonise_data(exposure_dat, outcome_dat,action=1)
+
+#mr_method_list()
+res <- mr(dat,method=c("mr_ivw_mre","mr_egger_regression","mr_weighted_median"))
+res<-data.frame(res)
+
+pleio<-mr_pleiotropy_test(dat)
+pleio$method<-"egger_intercept"
+pleio$nsnp<-unique(res$nsnp)
+names(pleio)[5]<-"b" ##change the name (egger_intercept to b)
+res_all<-rbind(res,pleio)
+
+heter<-mr_heterogeneity(dat,method=c("mr_ivw_mre"))
+heter<-data.frame(heter)
+heter$method<-paste0(heter$method,"_heterogeneity")
+heter$nsnp<-NA
+heter$b<-NA
+heter$se<-NA
+heter$pval<-heter$Q_pval
+res_all_heter<-rbind(res_all,heter[names(res_all)])
+
+write.csv(res_all_heter,paste0("Main_MR_result_ACE2_cig_",i,".csv"),row.names=F,quote=F)
+
+###MRPRESSO
+library(MRPRESSO)
+
+exposure<-"cig"
+outcome<-i
+dat_pre<-read.table(paste0("Summary_ACE2_cig_",i,".txt"),header=T)
+presso <- mr_presso(BetaOutcome = "BETA_out_new", BetaExposure = "BETA_ex",
+                      SdOutcome = "SE_out", SdExposure = "SE_ex",
+                      OUTLIERtest = TRUE, DISTORTIONtest = TRUE,
+                      data = dat_pre, NbDistribution = 1000, SignifThreshold = 0.001)
+Global_Test_Pvalue<-presso$`MR-PRESSO results`$`Global Test`$Pvalue
+raw_beta<-presso$'Main MR results'[1,3]
+raw_se<-presso$'Main MR results'[1,4]
+raw_Pvalue<-presso$'Main MR results'[1,6]
+Outlier_snps<-length(presso$`MR-PRESSO results`$`Distortion Test`$`Outliers Indices`)
+Outlier_corrected_beta<-presso$'Main MR results'[2,3]]
+Outlier_corrected_se<-presso$'Main MR results'[2,4]
+Outlier_corrected_Pvalue<-presso$'Main MR results'[2,6]
+r<cbind(exposure,outcome,raw_beta,raw_se,raw_Pvalue,Global_Test_Pvalue,Outlier_snps,Outlier_corrected_beta,Outlier_corrected_se,Outlier_corrected_Pvalue)
+
+r_presso<-rbind(r_presso,r)
+write.csv(r_presso,paste0("presso_MR_result_ACE2_cig_all.csv"),row.names=F,quote=F)
+
+
+###secondary analysis (use IVs removing palindromic SNPs)
+dat2 <- harmonise_data(exposure_dat, outcome_dat,action=3)
+res2 <- mr(dat2,method=c("mr_ivw_mre","mr_egger_regression","mr_weighted_median"))
+res2<-data.frame(res2)
+
+pleio2<-mr_pleiotropy_test(dat2)
+pleio2$method<-"egger_intercept"
+pleio2$nsnp<-unique(res2$nsnp)
+names(pleio2)[5]<-"b" ##change the name (egger_intercept to b)
+res_all2<-rbind(res2,pleio2)
+
+heter2<-mr_heterogeneity(dat2,method=c("mr_ivw_mre"))
+heter2<-data.frame(heter2)
+heter2$method<-paste0(heter2$method,"_heterogeneity")
+heter2$nsnp<-NA
+heter2$b<-NA
+heter2$se<-NA
+heter2$pval<-heter2$Q_pval
+res_all_heter2<-rbind(res_all2,heter2[names(res_all2)])
+
+write.csv(res_all_heter2,paste0("Second_MR_result_ACE2_cig_",i,".csv"),row.names=F,quote=F)
+
+###sensitivity analysis 1 (use all IVs, removing those associated with potential confounding traits as confirmed by GWAS Catalog,basically any other trait that is not the four smoking-related phenotypes)
+m<-read.table(paste0("Summary_ACE2_cig_",i,".txt"),header=T)
+
+require(MRInstruments)
+data(gwas_catalog)
+
+gwas<-gwas_catalog[gwas_catalog$SNP%in%m$SNP,]
+gwas1<-gwas[-grep("smok|Smoking",gwas$Phenotype),]##keep snps associated with any other traits (not smoke)
+m1<-m[!m$SNP%in%gwas1$SNP,]
+
+write.table(m1,paste0("Summary_sensitivity_ACE2_cig_",i,".txt"),row.names=F,quote=F)
+
+exposure_dat_sensitivity <- read_exposure_data(filename=paste0("Summary_sensitivity_ACE2_cig_",i,".txt"),clump = FALSE,sep = " ",phenotype_col = "exposure",snp_col = "SNP",beta_col = "BETA_ex",se_col = "SE_ex",eaf_col = "EAF",effect_allele_col = "ALT",other_allele_col = "Ref",pval_col = "P_ex",log_pval = FALSE)
+
+outcome_dat_sensitivity <- read_outcome_data(filename=paste0("Summary_sensitivity_ACE2_cig_",i,".txt"),snps = NULL,sep = " ",phenotype_col ="tissue",snp_col = "SNP",beta_col = "BETA_out_new",se_col = "SE_out",eaf_col = "EAF_out",effect_allele_col = "ALT",other_allele_col = "Ref",pval_col = "P_out",log_pval = FALSE)
+
+# Harmonise the exposure and outcome data
+dat_sensitivity <- harmonise_data(exposure_dat_sensitivity, outcome_dat_sensitivity,action=1)
+
+res_sensitivity <- mr(dat_sensitivity,method=c("mr_ivw_mre","mr_egger_regression","mr_weighted_median"))
+res_sensitivity<-data.frame(res_sensitivity)
+
+pleio_sensitivity<-mr_pleiotropy_test(dat_sensitivity)
+pleio_sensitivity$method<-"egger_intercept"
+pleio_sensitivity$nsnp<-unique(res_sensitivity$nsnp)
+names(pleio_sensitivity)[5]<-"b" ##change the name (egger_intercept to b)
+res_sensitivity_all<-rbind(res_sensitivity,pleio_sensitivity)
+
+heter_sensitivity<-mr_heterogeneity(dat_sensitivity,method=c("mr_ivw_mre"))
+heter_sensitivity<-data.frame(heter_sensitivity)
+heter_sensitivity$method<-paste0(heter_sensitivity$method,"_heterogeneity")
+heter_sensitivity$nsnp<-NA
+heter_sensitivity$b<-NA
+heter_sensitivity$se<-NA
+heter_sensitivity$pval<-heter_sensitivity$Q_pval
+res_all_heter_sensitivity<-rbind(res_sensitivity_all,heter_sensitivity[names(res_sensitivity_all)])
+
+
+write.csv(res_all_heter_sensitivity,paste0("Sensitivity_GWAS_catalog_MR_result_ACE2_cig_",i,".csv"),row.names=F,quote=F)
+
+###sensitivity analysis 2 (leave-one-out analysis)
+dat <- harmonise_data(exposure_dat, outcome_dat,action=1)
+res_leaveoneout<-mr_leaveoneout(dat, parameters = default_parameters(), method = mr_ivw_mre)
+
+write.csv(res_leaveoneout,paste0("Sensitivity_leave_one_out_MR_result_ACE2_cig_",i,".csv"),row.names=F,quote=F)
+
+
+r_summary<-rbind(r_summary,m)
+r_main<-rbind(r_main,res_all_heter)
+r_second<-rbind(r_second,res_all_heter2)
+r_sen1<-rbind(r_sen1,res_all_heter_sensitivity)
+r_sen2<-rbind(r_sen2,res_leaveoneout)
+
+}
+
+setwd("..")
+write.csv(r_summary,paste0("Summary_ACE2_cig_all.csv"),row.names=F,quote=F)
+write.csv(r_main,paste0("Main_MR_result_ACE2_cig_all.csv"),row.names=F,quote=F)
+write.csv(r_second,paste0("Second_MR_result_ACE2_cig_all.csv"),row.names=F,quote=F)
+write.csv(r_sen1,paste0("Sensitivity_GWAS_catalog_MR_result_ACE2_cig_all.csv"),row.names=F,quote=F)
+write.csv(r_sen2,paste0("Sensitivity_leave_one_out_MR_result_ACE2_cig_all.csv"),row.names=F,quote=F)
